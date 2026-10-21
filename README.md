@@ -49,7 +49,7 @@ EVENT hangup SIP/100
 ## Compile only
 
 ```sh
-apt install build-essential git
+apt install gcc git
 git clone https://github.com/fatehiman/linux-live-log-processor.git
 cd linux-live-log-processor
 sh compile.sh          # build only

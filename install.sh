@@ -9,13 +9,8 @@ if [ "$(id -u)" -ne 0 ]; then
     echo "Please run as root (sudo sh install.sh)"
     exit 1
 fi
-if ! command -v gcc >/dev/null 2>&1 || ! command -v make >/dev/null 2>&1; then
-    echo "gcc and make are needed. Install them with: apt install build-essential"
-    exit 1
-fi
-
-make clean
-make
+cd "$(dirname "$0")"
+sh compile.sh
 
 install -d -m 755 "$PREFIX"
 install -m 755 livelog livelog-decrypt "$PREFIX/"
