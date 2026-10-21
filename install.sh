@@ -5,7 +5,7 @@
 # Needed files in this folder: compile.sh, src/, and a config:
 #   livelog.conf          (your config, used first)
 #   livelog.conf.example  (used if livelog.conf is not here)
-# An existing /opt/livelog/livelog.conf is never overwritten.
+# /opt/livelog/livelog.conf is overwritten every time (the old one is saved as livelog.conf.bak).
 set -e
 
 PREFIX=/opt/livelog
@@ -19,16 +19,13 @@ fi
 cd "$(dirname "$0")"
 
 # --- check files first, before changing anything ---
-CONF_SRC=""
-if [ ! -f "$PREFIX/livelog.conf" ]; then
-    if [ -f livelog.conf ]; then
-        CONF_SRC=livelog.conf
-    elif [ -f livelog.conf.example ]; then
-        CONF_SRC=livelog.conf.example
-    else
-        echo "No config found. Put livelog.conf (or livelog.conf.example) in $(pwd)"
-        exit 1
-    fi
+if [ -f livelog.conf ]; then
+    CONF_SRC=livelog.conf
+elif [ -f livelog.conf.example ]; then
+    CONF_SRC=livelog.conf.example
+else
+    echo "No config found. Put livelog.conf (or livelog.conf.example) in $(pwd)"
+    exit 1
 fi
 if [ ! -f compile.sh ]; then
     echo "Missing file: $(pwd)/compile.sh"
@@ -41,12 +38,12 @@ sh compile.sh
 # --- install programs and config ---
 install -d -m 755 "$PREFIX"
 install -m 755 livelog livelog-decrypt "$PREFIX/"
-if [ -n "$CONF_SRC" ]; then
-    install -m 600 "$CONF_SRC" "$PREFIX/livelog.conf"
-    echo "Config installed from $CONF_SRC to $PREFIX/livelog.conf"
-else
-    echo "Config kept: $PREFIX/livelog.conf"
+if [ -f "$PREFIX/livelog.conf" ]; then
+    install -m 600 "$PREFIX/livelog.conf" "$PREFIX/livelog.conf.bak"
+    echo "Old config saved as $PREFIX/livelog.conf.bak"
 fi
+install -m 600 "$CONF_SRC" "$PREFIX/livelog.conf"
+echo "Config installed from $CONF_SRC to $PREFIX/livelog.conf"
 
 # --- systemd service ---
 cat > "$UNIT" <<EOF

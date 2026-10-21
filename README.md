@@ -105,7 +105,7 @@ Files after install:
 
 The service starts after boot. It waits 30 seconds first, so asterisk has time to start. To change this, edit `START_DELAY` in `install.sh` and run it again.
 
-`install.sh` needs only `compile.sh`, `src/`, and a config file in the folder. It uses `livelog.conf` if it is there, else `livelog.conf.example`. It never overwrites an existing `/opt/livelog/livelog.conf`. If the key is still `change-me-please`, it installs but does not start the service.
+`install.sh` needs only `compile.sh`, `src/`, and a config file in the folder. It uses `livelog.conf` if it is there, else `livelog.conf.example`. It **overwrites** `/opt/livelog/livelog.conf` every time (the old file is saved as `livelog.conf.bak`). If the key is still `change-me-please`, it installs but does not start the service.
 
 Useful commands:
 
@@ -115,7 +115,7 @@ journalctl -u livelog -f          # messages of the service
 systemctl restart livelog         # after you change the config
 ```
 
-To update: `git pull && sudo sh install.sh` (it builds, installs the new program and restarts the service; your config is kept, so add new keys to `/opt/livelog/livelog.conf` by hand, then `systemctl restart livelog`).
+To update: `git pull && sudo sh install.sh` (it builds, installs the new program and restarts the service; the config in the project folder replaces `/opt/livelog/livelog.conf`, so keep your real `livelog.conf` in the project folder).
 To remove: `sudo sh uninstall.sh` (config and logs are kept).
 
 ## Config
