@@ -1,0 +1,45 @@
+# livelog configuration
+# Format: key = value
+# Lines that start with # are comments.
+# You can put a value in "double quotes" to keep spaces at its start or end.
+# The program reads livelog.conf next to itself (or use: livelog -c /path/file.conf).
+
+# Command to run. Its output is read live, line by line.
+# If the command stops, livelog waits restart_delay seconds and runs it again.
+command = asterisk -rvvvvv
+
+# A line that STARTS with this text begins a new chunk (case sensitive).
+event_prefix = EVENT
+
+# Texts to look for in the EVENT line (case sensitive).
+# Write one "match =" line for each text.
+# If there is no match line, every chunk is logged.
+match = SIP/100
+match = SIP/200
+
+# any = the EVENT line must have at least one of the texts
+# all = the EVENT line must have every text
+match_mode = any
+
+# Key for the log file encryption. Change it! (max 248 characters)
+# You need the same key to read the files with livelog-decrypt.
+key = change-me-please
+
+# Folder for the log files.
+log_dir = /var/log/livelog
+
+# File name is: <file_prefix>yyyymmdd.log  ->  ast-20261021.log
+file_prefix = ast-
+
+# Keep only the newest N log files. Older files are deleted. 0 = keep all.
+keep_files = 20
+
+# Seconds to wait before running the command again after it stops.
+restart_delay = 5
+
+# yes = run the command in a pseudo-terminal (needed for "asterisk -r").
+# no  = use a simple pipe.
+use_pty = yes
+
+# yes = remove color codes and other control characters from each line.
+strip_ansi = yes

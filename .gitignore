@@ -1,0 +1,6 @@
+livelog
+livelog-decrypt
+*.o
+*.exe
+*.conf
+!livelog.conf.example

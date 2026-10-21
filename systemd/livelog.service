@@ -1,0 +1,17 @@
+[Unit]
+Description=livelog - live log processor (encrypted chunk logger)
+After=network-online.target asterisk.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Wait after boot so asterisk is ready. Change the number if you need.
+ExecStartPre=/bin/sleep 30
+ExecStart=/opt/livelog/livelog
+Restart=always
+RestartSec=10
+TimeoutStartSec=120
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target
