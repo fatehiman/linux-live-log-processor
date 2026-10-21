@@ -71,10 +71,12 @@ Files after install:
 | `/opt/livelog/livelog` | the service program |
 | `/opt/livelog/livelog-decrypt` | decrypt tool |
 | `/opt/livelog/livelog.conf` | config (next to the program, `chmod 600`) |
-| `/etc/systemd/system/livelog.service` | systemd unit |
+| `/etc/systemd/system/livelog.service` | systemd unit (written by `install.sh`) |
 | `/var/log/livelog/` | encrypted log files (default `log_dir`) |
 
-The service starts after boot. It waits 30 seconds first (`ExecStartPre=/bin/sleep 30` in the unit file), so asterisk has time to start.
+The service starts after boot. It waits 30 seconds first, so asterisk has time to start. To change this, edit `START_DELAY` in `install.sh` and run it again.
+
+`install.sh` needs only `compile.sh`, `src/`, and a config file in the folder. It uses `livelog.conf` if it is there, else `livelog.conf.example`. It never overwrites an existing `/opt/livelog/livelog.conf`. If the key is still `change-me-please`, it installs but does not start the service.
 
 Useful commands:
 
