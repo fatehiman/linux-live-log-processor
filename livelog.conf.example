@@ -43,3 +43,32 @@ use_pty = yes
 
 # yes = remove color codes and other control characters from each line.
 strip_ansi = yes
+
+# ---------- FTP upload (optional) ----------
+# If ftp_server is set, the log files are uploaded to an FTP server.
+# Plain FTP, passive mode (FTPS / SFTP are not supported).
+# The uploaded files are still encrypted. Only the FTP password is not hidden on the network.
+# Every ftp_interval seconds: first the file of today, then the file before it,
+# then all older files (newest to oldest). Files are uploaded only if their size
+# is different on the server. Files are never deleted on the server.
+#ftp_server = ftp.example.com
+#ftp_user = myuser
+#ftp_password = mypassword
+
+# Target folder on the server. It is created if it is missing. Empty = login folder.
+#ftp_path = /livelog/pbx1
+
+# Seconds between two upload rounds (counted from the end of the last round).
+#ftp_interval = 60
+
+# FTP port.
+#ftp_port = 21
+
+# If the upload of today's file or of the file before it fails, it is tried again
+# ftp_retries times, ftp_retry_delay seconds apart. Then the round goes on.
+# Older files get one try per round (they are tried again in the next round).
+#ftp_retries = 10
+#ftp_retry_delay = 10
+
+# Seconds to wait for the server (connect, reply, data) before the try fails.
+#ftp_timeout = 30

@@ -5,3 +5,4 @@ These files are pushed to GitHub but are never deployed to a server.
 
 - [file-format.md](file-format.md) - format of the encrypted log file
 - [logic-examples.md](logic-examples.md) - examples of the chunk logic (agreed with the customer)
+- [ftp-upload.md](ftp-upload.md) - how the FTP upload works and why

@@ -46,6 +46,35 @@ EVENT hangup SIP/100
 - The files are encrypted. Simple encryption (RC4 with a random nonce for each line). It stops people from reading the file as plain text. It is not strong encryption.
 - Each line is saved at once. After a crash or power loss, all lines written before are still readable.
 
+## FTP upload (optional)
+
+If you set `ftp_server`, `ftp_user` and `ftp_password` in the config, livelog uploads the log files to an FTP server. The files stay encrypted. It uses plain FTP in passive mode (no FTPS, no SFTP), and needs no extra library.
+
+```
+ftp_server = ftp.example.com
+ftp_user = myuser
+ftp_password = mypassword
+ftp_path = /livelog/pbx1
+ftp_interval = 60
+```
+
+A second process does the upload. It never slows down or blocks the logging. Every `ftp_interval` seconds (default 60) it does one **round**:
+
+1. **File of today.** It is still written, so livelog first makes a copy in `/tmp` (only complete records, never a half written line) and uploads the copy. If the size on the server is already the same, nothing is sent. If it fails or times out, livelog tries again after `ftp_retry_delay` seconds (default 10), up to `ftp_retries` times (default 10).
+2. **File before it.** The same: size check, and the same retries.
+3. **Older files**, from newest to oldest. A file is uploaded only if its size on the server is different. One try each. If a try fails, there is no retry. The file is tried again in the next round.
+
+Notes:
+
+- Today's file has the first priority. When it fails 10 times, the round goes on with the other files. In the next round it starts again with today's file.
+- If the server cannot be reached at all, the older files wait for the next round (this saves time).
+- Files on the server are never deleted, even if livelog already deleted them (`keep_files`).
+- The target folder (`ftp_path`) is created if it is missing.
+- The next round starts `ftp_interval` seconds after the end of the last one.
+- The FTP password is in the config file (`chmod 600`). Plain FTP sends the password without encryption.
+- Messages are in `journalctl -u livelog -f` (lines that start with `livelog: ftp:`).
+- To test the settings once, without the service: `/opt/livelog/livelog -u` (one round, then exit).
+
 ## Compile only
 
 ```sh
@@ -86,7 +115,7 @@ journalctl -u livelog -f          # messages of the service
 systemctl restart livelog         # after you change the config
 ```
 
-To update: `git pull && sudo sh install.sh` (your config is kept).
+To update: `git pull && sudo sh install.sh` (it builds, installs the new program and restarts the service; your config is kept, so add new keys to `/opt/livelog/livelog.conf` by hand, then `systemctl restart livelog`).
 To remove: `sudo sh uninstall.sh` (config and logs are kept).
 
 ## Config
@@ -106,6 +135,15 @@ See [livelog.conf.example](livelog.conf.example). Main keys:
 | `restart_delay` | `5` | seconds to wait before running the command again |
 | `use_pty` | `yes` | run the command in a pseudo-terminal |
 | `strip_ansi` | `yes` | remove color codes and control characters |
+| `ftp_server` | – | FTP server name or IP. Empty = no upload |
+| `ftp_user` | – | FTP user (needed if `ftp_server` is set) |
+| `ftp_password` | – | FTP password |
+| `ftp_path` | – (login folder) | target folder on the server |
+| `ftp_interval` | `60` | seconds between two upload rounds |
+| `ftp_port` | `21` | FTP port |
+| `ftp_retries` | `10` | retries for today's file and the file before it |
+| `ftp_retry_delay` | `10` | seconds between two tries |
+| `ftp_timeout` | `30` | seconds to wait for the server |
 
 Match texts are case sensitive.
 
@@ -141,6 +179,7 @@ A wrong key gives the error `wrong key`.
 make          # builds livelog and livelog-decrypt
 make test     # runs tests/run.sh
 ./livelog -c my.conf -s < sample.txt   # -s: read stdin once, for tests
+./livelog -c my.conf -u                # -u: one FTP upload round, then exit
 ```
 
 More details: [reference-docs/](reference-docs/).

@@ -10,10 +10,13 @@
  *   - If it does not contain them, logging is OFF until the next chunk.
  *   - If the command stops, wait restart_delay seconds and run it again.
  *   - Stop only with SIGTERM / SIGINT (systemctl stop).
+ *   - If ftp_server is set, a second process uploads the log files to the
+ *     FTP server every ftp_interval seconds (newest file first).
  *
- * Usage: livelog [-c config-file] [-s]
+ * Usage: livelog [-c config-file] [-s] [-u]
  *   -c  config file (default: livelog.conf next to the program)
  *   -s  read lines from stdin once instead of running the command (for tests)
+ *   -u  run one FTP upload round and exit (for tests / manual check)
  */
 #define _GNU_SOURCE
 #include <ctype.h>
@@ -28,15 +31,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
+#include "ftp.h"
 #include "rc4.h"
 
-#define LIVELOG_VERSION "1.0.0"
+#define LIVELOG_VERSION "1.1.0"
 #define MAX_MATCH       64
 #define MAX_LINE        (1024 * 1024)
 
@@ -53,6 +58,15 @@ struct config {
     int restart_delay;
     int use_pty;
     int strip_ansi;
+    char ftp_server[256];
+    int ftp_port;
+    char ftp_user[128];
+    char ftp_password[256];
+    char ftp_path[512];
+    int ftp_interval;       /* seconds between two upload rounds */
+    int ftp_retries;        /* extra tries for the 2 newest files */
+    int ftp_retry_delay;    /* seconds between two tries */
+    int ftp_timeout;        /* seconds, for every network operation */
 };
 
 static struct config cfg;
@@ -67,6 +81,13 @@ static int g_logging = 0;
 static char g_line[MAX_LINE + 1];
 static size_t g_len = 0;
 static unsigned char g_rec[MAX_LINE + LL_CHECK_LEN + 2];
+
+static struct ftp g_ftp;
+static pid_t g_uploader = -1;          /* pid of the upload process (in the main process) */
+static time_t g_uploader_started = 0;
+static int g_is_uploader = 0;          /* 1 in the upload process */
+
+static void uploader_check(void);
 
 static void logmsg(const char *fmt, ...)
 {
@@ -124,6 +145,11 @@ static int load_config(const char *path)
     cfg.restart_delay = 5;
     cfg.use_pty = 1;
     cfg.strip_ansi = 1;
+    cfg.ftp_port = 21;
+    cfg.ftp_interval = 60;
+    cfg.ftp_retries = 10;
+    cfg.ftp_retry_delay = 10;
+    cfg.ftp_timeout = 30;
 
     f = fopen(path, "r");
     if (!f) {
@@ -179,6 +205,24 @@ static int load_config(const char *path)
             cfg.use_pty = parse_bool(v);
         else if (!strcmp(k, "strip_ansi"))
             cfg.strip_ansi = parse_bool(v);
+        else if (!strcmp(k, "ftp_server"))
+            setstr(cfg.ftp_server, sizeof(cfg.ftp_server), v, k);
+        else if (!strcmp(k, "ftp_port"))
+            cfg.ftp_port = atoi(v);
+        else if (!strcmp(k, "ftp_user"))
+            setstr(cfg.ftp_user, sizeof(cfg.ftp_user), v, k);
+        else if (!strcmp(k, "ftp_password"))
+            setstr(cfg.ftp_password, sizeof(cfg.ftp_password), v, k);
+        else if (!strcmp(k, "ftp_path"))
+            setstr(cfg.ftp_path, sizeof(cfg.ftp_path), v, k);
+        else if (!strcmp(k, "ftp_interval"))
+            cfg.ftp_interval = atoi(v);
+        else if (!strcmp(k, "ftp_retries"))
+            cfg.ftp_retries = atoi(v);
+        else if (!strcmp(k, "ftp_retry_delay"))
+            cfg.ftp_retry_delay = atoi(v);
+        else if (!strcmp(k, "ftp_timeout"))
+            cfg.ftp_timeout = atoi(v);
         else
             logmsg("config %s:%d: unknown key '%s', ignored", path, ln, k);
     }
@@ -198,6 +242,20 @@ static int load_config(const char *path)
     }
     if (cfg.restart_delay < 1)
         cfg.restart_delay = 1;
+    if (cfg.ftp_server[0] && !cfg.ftp_user[0]) {
+        logmsg("config: ftp_server is set but ftp_user is empty, FTP upload is off");
+        cfg.ftp_server[0] = '\0';
+    }
+    if (cfg.ftp_port < 1 || cfg.ftp_port > 65535)
+        cfg.ftp_port = 21;
+    if (cfg.ftp_interval < 1)
+        cfg.ftp_interval = 1;
+    if (cfg.ftp_retries < 0)
+        cfg.ftp_retries = 0;
+    if (cfg.ftp_retry_delay < 1)
+        cfg.ftp_retry_delay = 1;
+    if (cfg.ftp_timeout < 1)
+        cfg.ftp_timeout = 30;
     return 0;
 }
 
@@ -238,19 +296,19 @@ static int cmp_names(const void *a, const void *b)
     return strcmp(*(char *const *)a, *(char *const *)b);
 }
 
-/* Keep only the newest keep_files log files. Names sort by date. */
-static void cleanup_old_files(void)
+/* Names of all log files in log_dir, sorted from old to new (names sort by date).
+ * Free with free_names() when done. */
+static size_t list_log_files(char ***out)
 {
     DIR *d;
     struct dirent *e;
-    char **names = NULL, **tmp, path[PATH_MAX];
-    size_t n = 0, cap = 0, i;
+    char **names = NULL, **tmp;
+    size_t n = 0, cap = 0;
 
-    if (cfg.keep_files <= 0)
-        return;
+    *out = NULL;
     d = opendir(cfg.log_dir);
     if (!d)
-        return;
+        return 0;
     while ((e = readdir(d)) != NULL) {
         if (!is_log_name(e->d_name))
             continue;
@@ -264,9 +322,31 @@ static void cleanup_old_files(void)
         names[n++] = strdup(e->d_name);
     }
     closedir(d);
-
-    if (n > (size_t)cfg.keep_files) {
+    if (n > 1)
         qsort(names, n, sizeof(*names), cmp_names);
+    *out = names;
+    return n;
+}
+
+static void free_names(char **names, size_t n)
+{
+    size_t i;
+
+    for (i = 0; i < n; i++)
+        free(names[i]);
+    free(names);
+}
+
+/* Keep only the newest keep_files log files. */
+static void cleanup_old_files(void)
+{
+    char **names, path[PATH_MAX];
+    size_t n, i;
+
+    if (cfg.keep_files <= 0)
+        return;
+    n = list_log_files(&names);
+    if (n > (size_t)cfg.keep_files) {
         for (i = 0; i < n - (size_t)cfg.keep_files; i++) {
             snprintf(path, sizeof(path), "%s/%s", cfg.log_dir, names[i]);
             if (unlink(path) == 0)
@@ -275,9 +355,7 @@ static void cleanup_old_files(void)
                 logmsg("cannot remove %s: %s", path, strerror(errno));
         }
     }
-    for (i = 0; i < n; i++)
-        free(names[i]);
-    free(names);
+    free_names(names, n);
 }
 
 static int open_log(const char *date)
@@ -456,6 +534,7 @@ static void read_loop(int fd)
     pfd.fd = fd;
     pfd.events = POLLIN;
     while (!g_stop) {
+        uploader_check();
         r = poll(&pfd, 1, 1000);
         if (r < 0) {
             if (errno == EINTR)
@@ -561,8 +640,232 @@ static int stop_child(pid_t pid)
 
 static void sleep_seconds(int sec)
 {
-    while (sec-- > 0 && !g_stop)
+    while (sec-- > 0 && !g_stop) {
         sleep(1);
+        uploader_check();
+    }
+}
+
+/* ---------- FTP upload (runs in its own process) ---------- */
+
+static int read_full(FILE *f, void *buf, size_t n)
+{
+    return fread(buf, 1, n, f) == n ? 0 : -1;
+}
+
+/*
+ * Copy the log file of today into an unnamed temp file, because the main
+ * process may write to it at any moment. Only complete records are copied
+ * (see reference-docs/file-format.md), so a half written last record is
+ * never uploaded. Returns a descriptor at position 0, or -1.
+ */
+static int snapshot_fd(const char *path, long long *size)
+{
+    char tmpl[] = "/tmp/livelog-snap-XXXXXX";
+    unsigned char hdr[LL_HDR_LEN];
+    FILE *in, *out;
+    size_t rlen;
+    int fd, tfd;
+
+    in = fopen(path, "rbe");
+    if (!in)
+        return -1;
+    tfd = mkstemp(tmpl);
+    if (tfd < 0) {
+        logmsg("ftp: cannot create temp file in /tmp: %s", strerror(errno));
+        fclose(in);
+        return -1;
+    }
+    unlink(tmpl);   /* no name: it is gone when closed, even after a crash */
+    out = fdopen(tfd, "w+b");
+    if (!out) {
+        close(tfd);
+        fclose(in);
+        return -1;
+    }
+    *size = 0;
+    if (read_full(in, g_rec, LL_MAGIC_LEN) == 0) {
+        fwrite(g_rec, 1, LL_MAGIC_LEN, out);
+        *size = LL_MAGIC_LEN;
+        while (read_full(in, hdr, LL_HDR_LEN) == 0) {
+            rlen = ((size_t)hdr[8] << 24) | ((size_t)hdr[9] << 16) |
+                   ((size_t)hdr[10] << 8) | hdr[11];
+            if (rlen == 0 || rlen > sizeof(g_rec) || read_full(in, g_rec, rlen) < 0)
+                break;
+            fwrite(hdr, 1, LL_HDR_LEN, out);
+            fwrite(g_rec, 1, rlen, out);
+            *size += (long long)(LL_HDR_LEN + rlen);
+        }
+    }
+    fclose(in);
+    if (fflush(out) != 0) {
+        logmsg("ftp: cannot write temp file: %s", strerror(errno));
+        fclose(out);
+        errno = EIO;
+        return -1;
+    }
+    fd = dup(fileno(out));
+    fclose(out);
+    if (fd >= 0)
+        lseek(fd, 0, SEEK_SET);
+    return fd;
+}
+
+/* Make sure the FTP session is open. */
+static int ftp_session(void)
+{
+    if (g_ftp.ctrl >= 0)
+        return 0;
+    if (ftp_open(&g_ftp, cfg.ftp_server, cfg.ftp_port, cfg.ftp_user, cfg.ftp_password,
+                 cfg.ftp_path, cfg.ftp_timeout) < 0) {
+        logmsg("ftp: %s", g_ftp.err);
+        return -1;
+    }
+    return 0;
+}
+
+/*
+ * Upload one log file if its size is different on the server.
+ * snapshot = 1 for the file of today (it is still written).
+ * Returns 0 = done (or nothing to do), -1 = failed, -2 = no connection.
+ */
+static int upload_file(const char *name, int snapshot)
+{
+    char path[PATH_MAX];
+    struct stat st;
+    long long size = 0, rsize;
+    int fd, rc = -1;
+
+    snprintf(path, sizeof(path), "%s/%s", cfg.log_dir, name);
+    if (snapshot) {
+        fd = snapshot_fd(path, &size);
+    } else {
+        fd = open(path, O_RDONLY | O_CLOEXEC);
+        if (fd >= 0 && fstat(fd, &st) == 0)
+            size = st.st_size;
+    }
+    if (fd < 0) {
+        if (errno == ENOENT)
+            return 0;   /* removed by keep_files in the meantime */
+        logmsg("ftp: cannot read %s: %s", path, strerror(errno));
+        return -1;
+    }
+    if (ftp_session() < 0) {
+        close(fd);
+        return -2;
+    }
+    rsize = ftp_size(&g_ftp, name);
+    if (rsize == size) {
+        rc = 0;
+    } else if (ftp_store_fd(&g_ftp, fd, name) == 0) {
+        logmsg("ftp: uploaded %s (%lld bytes)", name, size);
+        rc = 0;
+    } else {
+        logmsg("ftp: upload of %s failed: %s", name, g_ftp.err);
+        ftp_close(&g_ftp);
+    }
+    close(fd);
+    return rc;
+}
+
+/*
+ * One upload round: newest file first (today), then the one before, then
+ * the older ones. The 2 newest files are tried again after a failure
+ * (ftp_retries times, ftp_retry_delay seconds apart). Older files get one try.
+ */
+static void upload_round(void)
+{
+    char **names, today[9];
+    size_t n, i;
+    time_t now = time(NULL);
+    struct tm tm;
+    int rank = 0, attempt, max_attempts, rc;
+
+    localtime_r(&now, &tm);
+    strftime(today, sizeof(today), "%Y%m%d", &tm);
+    n = list_log_files(&names);
+    for (i = n; i > 0; i--, rank++) {
+        const char *name = names[i - 1];
+        int is_today = strncmp(name + strlen(cfg.file_prefix), today, 8) == 0;
+
+        max_attempts = rank < 2 ? cfg.ftp_retries + 1 : 1;
+        rc = -1;
+        for (attempt = 1; attempt <= max_attempts; attempt++) {
+            if (attempt > 1) {
+                logmsg("ftp: retry %d of %d for %s in %d s", attempt - 1, cfg.ftp_retries,
+                       name, cfg.ftp_retry_delay);
+                sleep(cfg.ftp_retry_delay);
+            }
+            rc = upload_file(name, is_today);
+            if (rc == 0)
+                break;
+        }
+        if (rc == -2 && rank >= 2) {
+            logmsg("ftp: server not reachable, the other files wait for the next round");
+            break;
+        }
+    }
+    free_names(names, n);
+    ftp_close(&g_ftp);
+}
+
+static void uploader_main(int once)
+{
+    ftp_init(&g_ftp);
+    logmsg("ftp: upload to %s:%d, path '%s', every %d s", cfg.ftp_server, cfg.ftp_port,
+           cfg.ftp_path[0] ? cfg.ftp_path : "(login folder)", cfg.ftp_interval);
+    for (;;) {
+        upload_round();
+        if (once)
+            return;
+        sleep(cfg.ftp_interval);
+    }
+}
+
+static void uploader_start(void)
+{
+    pid_t pid, parent = getpid();
+
+    g_uploader_started = time(NULL);
+    pid = fork();
+    if (pid < 0) {
+        logmsg("ftp: fork failed: %s", strerror(errno));
+        return;
+    }
+    if (pid == 0) {
+        g_is_uploader = 1;
+        signal(SIGTERM, SIG_DFL);   /* stop at once, no clean up is needed */
+        signal(SIGINT, SIG_DFL);
+        signal(SIGHUP, SIG_DFL);
+        prctl(PR_SET_PDEATHSIG, SIGTERM);   /* die with the main process */
+        if (getppid() != parent)
+            _exit(0);
+        uploader_main(0);
+        _exit(0);
+    }
+    g_uploader = pid;
+}
+
+/* Main process: start the upload process again if it died. */
+static void uploader_check(void)
+{
+    if (g_is_uploader || !cfg.ftp_server[0] || g_stop)
+        return;
+    if (g_uploader > 0 && waitpid(g_uploader, NULL, WNOHANG) == g_uploader) {
+        logmsg("ftp: upload process ended, it will start again");
+        g_uploader = -1;
+    }
+    if (g_uploader < 0 && time(NULL) - g_uploader_started >= 10)
+        uploader_start();
+}
+
+static void uploader_stop(void)
+{
+    if (g_uploader > 0) {
+        kill(g_uploader, SIGTERM);
+        waitpid(g_uploader, NULL, 0);
+        g_uploader = -1;
+    }
 }
 
 /* ---------- main ---------- */
@@ -587,11 +890,11 @@ int main(int argc, char **argv)
 {
     char conf[PATH_MAX];
     const char *conf_arg = NULL;
-    int use_stdin = 0, opt, fd, st;
+    int use_stdin = 0, upload_once = 0, opt, fd, st;
     struct sigaction sa;
     pid_t pid;
 
-    while ((opt = getopt(argc, argv, "c:svh")) != -1) {
+    while ((opt = getopt(argc, argv, "c:suvh")) != -1) {
         switch (opt) {
         case 'c':
             conf_arg = optarg;
@@ -599,13 +902,17 @@ int main(int argc, char **argv)
         case 's':
             use_stdin = 1;
             break;
+        case 'u':
+            upload_once = 1;
+            break;
         case 'v':
             printf("livelog %s\n", LIVELOG_VERSION);
             return 0;
         default:
-            fprintf(stderr, "usage: %s [-c config-file] [-s]\n"
+            fprintf(stderr, "usage: %s [-c config-file] [-s] [-u]\n"
                             "  -c  config file (default: livelog.conf next to the program)\n"
-                            "  -s  read stdin once instead of running the command (for tests)\n",
+                            "  -s  read stdin once instead of running the command (for tests)\n"
+                            "  -u  run one FTP upload round and exit (for tests)\n",
                     argv[0]);
             return opt == 'h' ? 0 : 1;
         }
@@ -618,6 +925,14 @@ int main(int argc, char **argv)
         return 1;
 
     umask(077);
+    if (upload_once) {
+        if (!cfg.ftp_server[0]) {
+            logmsg("ftp_server is not set in the config");
+            return 1;
+        }
+        uploader_main(1);
+        return 0;
+    }
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = on_signal;   /* no SA_RESTART: blocking calls return EINTR */
     sigemptyset(&sa.sa_mask);
@@ -630,9 +945,12 @@ int main(int argc, char **argv)
     mkdir_p(cfg.log_dir);
     cleanup_old_files();
 
-    logmsg("started (version %s, config %s, prefix '%s', %d match text(s), mode %s)",
+    logmsg("started (version %s, config %s, prefix '%s', %d match text(s), mode %s, ftp %s)",
            LIVELOG_VERSION, conf, cfg.event_prefix, cfg.nmatch,
-           cfg.match_all ? "all" : "any");
+           cfg.match_all ? "all" : "any",
+           cfg.ftp_server[0] && !use_stdin ? "on" : "off");
+    if (cfg.ftp_server[0] && !use_stdin)
+        uploader_start();
 
     if (use_stdin) {
         read_loop(0);
@@ -663,6 +981,7 @@ int main(int argc, char **argv)
         }
     }
 
+    uploader_stop();
     if (g_log)
         fclose(g_log);
     if (g_rand_fd >= 0)

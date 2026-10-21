@@ -18,7 +18,7 @@ if ! command -v "$CC" >/dev/null 2>&1; then
     echo "CentOS/RHEL:   yum install gcc"
     exit 1
 fi
-for f in src/livelog.c src/livelog-decrypt.c src/rc4.h; do
+for f in src/livelog.c src/livelog-decrypt.c src/rc4.h src/ftp.h; do
     if [ ! -f "$f" ]; then
         echo "Missing file: $(pwd)/$f"
         echo "Copy the whole project folder (with the src folder), or use git clone."

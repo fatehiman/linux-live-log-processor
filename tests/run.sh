@@ -108,4 +108,68 @@ wait $PID || true
 printf '%s\n' '<TS>' 'EVENT SIP/100 pty' 'line2' > "$T/exp7.txt"
 check "pty mode + fast stop" "$T/exp7.txt" "$T/out7.txt"
 
+# --- 8. FTP upload (needs python3 for the fake FTP server) ---
+if command -v python3 >/dev/null 2>&1; then
+    rm -rf "$T/logs" "$T/ftp"; mkdir -p "$T/ftp"
+    ./livelog -c "$T/test.conf" -s < "$T/in.txt" 2>/dev/null
+    TODAY=$(ls "$T/logs"/ast-*.log)
+    for d in 20000101 20000102 20000103; do cp "$TODAY" "$T/logs/ast-$d.log"; done
+    echo extra >> "$T/logs/ast-20000102.log"
+    cat "$T/test.conf" > "$T/ftp.conf"
+    printf '%s\n' 'ftp_server = 127.0.0.1' 'ftp_user = u' 'ftp_password = p' \
+        'ftp_path = /a/b' 'ftp_retries = 3' 'ftp_retry_delay = 1' 'ftp_timeout = 5' >> "$T/ftp.conf"
+
+    start_ftpd() {   # extra options for the server
+        rm -f "$T/port"
+        python3 tests/fake_ftpd.py "$T/ftp" "$T/port" "$@" &
+        FTPD=$!
+        for i in 1 2 3 4 5 6 7 8 9 10; do [ -s "$T/port" ] && break; sleep 0.5; done
+        sed -i '/^ftp_port/d' "$T/ftp.conf"
+        echo "ftp_port = $(cat "$T/port")" >> "$T/ftp.conf"
+    }
+    same_files() {   # every local log file is on the server with the same content
+        for f in "$T"/logs/ast-*.log; do
+            cmp -s "$f" "$T/ftp/a/b/$(basename "$f")" || return 1
+        done
+    }
+
+    # 8a. all files are uploaded, the folder is created
+    start_ftpd
+    ./livelog -c "$T/ftp.conf" -u 2>/dev/null
+    if same_files; then echo "PASS: ftp upload of all files"; else echo "FAIL: ftp upload of all files"; FAIL=1; fi
+
+    # 8b. a half written last record is not uploaded; a file with a wrong size is uploaded again
+    cp "$TODAY" "$T/today.copy"
+    printf 'half-record' >> "$TODAY"
+    : > "$T/ftp/a/b/ast-20000101.log"
+    ./livelog -c "$T/ftp.conf" -u 2>/dev/null
+    if cmp -s "$T/today.copy" "$T/ftp/a/b/$(basename "$TODAY")" &&
+       cmp -s "$T/logs/ast-20000101.log" "$T/ftp/a/b/ast-20000101.log"; then
+        echo "PASS: ftp snapshot cut + size check"
+    else
+        echo "FAIL: ftp snapshot cut + size check"; FAIL=1
+    fi
+    kill $FTPD; wait $FTPD 2>/dev/null || true
+
+    # 8c. server refuses the first 2 uploads and has no EPSV: retries and PASV fallback
+    rm -rf "$T/ftp"; mkdir -p "$T/ftp"
+    truncate -s -11 "$TODAY"
+    start_ftpd --fail-stor 2 --no-epsv
+    ./livelog -c "$T/ftp.conf" -u 2>/dev/null
+    if same_files; then echo "PASS: ftp retry + PASV"; else echo "FAIL: ftp retry + PASV"; FAIL=1; fi
+    kill $FTPD; wait $FTPD 2>/dev/null || true
+
+    # 8d. no server: the round ends (retries for 2 newest files only), no crash
+    sed -i '/^ftp_port/d' "$T/ftp.conf"; echo 'ftp_port = 1' >> "$T/ftp.conf"
+    if ./livelog -c "$T/ftp.conf" -u 2>"$T/err8.txt"; then
+        N=$(grep -c 'cannot connect' "$T/err8.txt")
+        # 2 newest files: 1 try + 3 retries each = 8 tries; the 3rd file stops the round
+        if [ "$N" -eq 9 ]; then echo "PASS: ftp server down"; else echo "FAIL: ftp server down ($N tries)"; FAIL=1; fi
+    else
+        echo "FAIL: ftp server down (exit code)"; FAIL=1
+    fi
+else
+    echo "SKIP: ftp tests (python3 not found)"
+fi
+
 [ "$FAIL" -eq 0 ] && echo "ALL TESTS PASSED" || { echo "SOME TESTS FAILED"; exit 1; }
