@@ -958,7 +958,7 @@ int main(int argc, char **argv)
             handle_line(g_line, g_len);
     } else {
         while (!g_stop) {
-            logmsg("running: %s", cfg.command);
+            logmsg("running the command");
             pid = start_child(&fd);
             if (pid > 0) {
                 read_loop(fd);
