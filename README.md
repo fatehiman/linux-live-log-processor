@@ -173,6 +173,23 @@ livelog-decrypt.cmd ast-20261021.log MY_KEY out.txt
 
 A wrong key gives the error `wrong key`.
 
+### Decrypt a whole folder (no arguments)
+
+Run the decrypt tool **without arguments**:
+
+```sh
+/opt/livelog/livelog-decrypt          # Linux
+livelog-decrypt.cmd                   # Windows
+```
+
+- It reads `key` from `livelog.conf` **next to the tool** (the `.cmd` / `.ps1` file on Windows).
+- It looks at every `*.log` file in the **same folder as the tool**. Put the tool, `livelog.conf` and the log files in one folder.
+- A file that is still encrypted is decrypted. The encrypted original is kept as `<name>.log.bak`, and the plain text is saved as `<name>.log`.
+- A file that is already decrypted is skipped. So you can run it again and again.
+- If the key is wrong, or a `.bak` file already exists, that file is not changed.
+
+(In the service folder `/opt/livelog` there are no log files; copy them from `/var/log/livelog` to a folder with the tool and the config.)
+
 ## Build and test by hand
 
 ```sh

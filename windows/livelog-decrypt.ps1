@@ -5,11 +5,16 @@
 #   or simply:  livelog-decrypt.cmd <file> <key> [output-file]
 #
 # Without output-file the plain text is shown in the console.
+#
+# Without any argument: the key is read from livelog.conf next to this script,
+# and every *.log file in this folder that is still encrypted is decrypted.
+# The original is kept as <name>.log.bak, the plain text is saved as <name>.log.
+# Files that are already decrypted are skipped.
 # No install is needed. It works with Windows PowerShell 5.1 and PowerShell 7.
 
 param(
-    [Parameter(Mandatory = $true, Position = 0)][string]$File,
-    [Parameter(Mandatory = $true, Position = 1)][string]$Key,
+    [Parameter(Position = 0)][string]$File,
+    [Parameter(Position = 1)][string]$Key,
     [Parameter(Position = 2)][string]$OutFile
 )
 
@@ -92,7 +97,75 @@ if (-not ('LiveLogDecrypt' -as [type])) {
     Add-Type -TypeDefinition $src -Language CSharp
 }
 
+function Get-ConfKey([string]$confPath) {
+    $key = $null
+    foreach ($line in [System.IO.File]::ReadAllLines($confPath, [System.Text.Encoding]::UTF8)) {
+        $t = $line.Trim()
+        if ($t -eq '' -or $t.StartsWith('#') -or $t.StartsWith(';')) { continue }
+        $i = $t.IndexOf('=')
+        if ($i -lt 0 -or $t.Substring(0, $i).Trim() -ne 'key') { continue }
+        $v = $t.Substring($i + 1).Trim()
+        if ($v.Length -ge 2 -and $v.StartsWith('"') -and $v.EndsWith('"')) { $v = $v.Substring(1, $v.Length - 2) }
+        $key = $v
+    }
+    return $key
+}
+
+function Test-Encrypted([string]$path) {
+    $fs = [System.IO.File]::Open($path, 'Open', 'Read', 'ReadWrite')
+    try {
+        $m = New-Object byte[] 4
+        $n = $fs.Read($m, 0, 4)
+        return ($n -eq 4 -and $m[0] -eq 76 -and $m[1] -eq 76 -and $m[2] -eq 80 -and $m[3] -eq 49)   # "LLP1"
+    } finally { $fs.Close() }
+}
+
+# No arguments: decrypt every still encrypted *.log file in this folder.
+function Convert-Folder {
+    $dir = $PSScriptRoot
+    $conf = Join-Path $dir 'livelog.conf'
+    $k = $null
+    if (Test-Path -LiteralPath $conf) { $k = Get-ConfKey $conf }
+    if (-not $k) {
+        [Console]::Error.WriteLine("No arguments, and no key found in $conf")
+        [Console]::Error.WriteLine("usage: livelog-decrypt.cmd <file> <key> [output-file]")
+        [Console]::Error.WriteLine("   or: livelog-decrypt.cmd   (with livelog.conf next to this script)")
+        return 1
+    }
+    $keyBytes = [System.Text.Encoding]::UTF8.GetBytes($k)
+    $done = 0; $skipped = 0; $failed = 0
+    foreach ($f in Get-ChildItem -LiteralPath $dir -Filter '*.log' -File) {
+        $path = $f.FullName
+        if (-not (Test-Encrypted $path)) { $skipped++; continue }
+        $bak = "$path.bak"
+        $tmp = "$path.tmp"
+        if (Test-Path -LiteralPath $bak) {
+            [Console]::Error.WriteLine("${path}: skipped, $bak already exists")
+            $failed++; continue
+        }
+        try {
+            $out = [System.IO.File]::Create($tmp)
+            try { $n = [LiveLogDecrypt]::Run($path, $keyBytes, $out) } finally { $out.Close() }
+            [System.IO.File]::Move($path, $bak)
+            [System.IO.File]::Move($tmp, $path)
+            Write-Host "${path}: decrypted, $n lines (original kept as $bak)"
+            $done++
+        } catch {
+            $msg = $_.Exception.Message
+            if ($_.Exception.InnerException) { $msg = $_.Exception.InnerException.Message }
+            if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force }
+            [Console]::Error.WriteLine("${path}: NOT decrypted (file is unchanged): $msg")
+            $failed++
+        }
+    }
+    Write-Host "${dir}: $done decrypted, $skipped already decrypted, $failed failed"
+    if ($failed) { return 1 }
+    return 0
+}
+
 try {
+    if (-not $File) { exit (Convert-Folder) }
+    if (-not $Key) { throw "usage: livelog-decrypt.cmd <file> <key> [output-file]" }
     $inPath = (Resolve-Path -LiteralPath $File).Path
     $keyBytes = [System.Text.Encoding]::UTF8.GetBytes($Key)
     if ($OutFile) {

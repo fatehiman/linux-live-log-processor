@@ -172,4 +172,39 @@ else
     echo "SKIP: ftp tests (python3 not found)"
 fi
 
+# --- 9. livelog-decrypt without arguments: key from livelog.conf, all *.log in the folder ---
+rm -rf "$T/logs" "$T/d"; mkdir -p "$T/d"
+./livelog -c "$T/test.conf" -s < "$T/in.txt" 2>/dev/null
+cp "$T"/logs/ast-*.log "$T/d/ast-20000101.log"
+cp "$T"/logs/ast-*.log "$T/d/ast-20000102.log"
+cp "$T"/logs/ast-*.log "$T/orig.log"
+echo "just text" > "$T/d/plain.log"
+cp livelog-decrypt "$T/d/"
+cp "$T/test.conf" "$T/d/livelog.conf"
+"$T/d/livelog-decrypt" > "$T/dec1.txt" 2>&1
+if cmp -s "$T/orig.log" "$T/d/ast-20000101.log.bak" && cmp -s "$T/orig.log" "$T/d/ast-20000102.log.bak" &&
+   [ "$(cat "$T/d/plain.log")" = "just text" ] && [ ! -e "$T/d/plain.log.bak" ] &&
+   sed -E 's/^[0-9]{14}$/<TS>/' "$T/d/ast-20000101.log" | cmp -s - "$T/exp.txt"; then
+    echo "PASS: decrypt without arguments"
+else
+    echo "FAIL: decrypt without arguments"; cat "$T/dec1.txt"; FAIL=1
+fi
+# second run: nothing to do, .bak files stay
+"$T/d/livelog-decrypt" > "$T/dec2.txt" 2>&1
+if grep -q '0 decrypted, 3 already decrypted, 0 failed' "$T/dec2.txt" &&
+   cmp -s "$T/orig.log" "$T/d/ast-20000101.log.bak"; then
+    echo "PASS: decrypted files are skipped"
+else
+    echo "FAIL: decrypted files are skipped"; cat "$T/dec2.txt"; FAIL=1
+fi
+# wrong key in livelog.conf: file stays as it is
+cp "$T/orig.log" "$T/d/ast-20000103.log"
+sed -i 's/^key = .*/key = wrong-key/' "$T/d/livelog.conf"
+if ! "$T/d/livelog-decrypt" >/dev/null 2>&1 && cmp -s "$T/orig.log" "$T/d/ast-20000103.log" &&
+   [ ! -e "$T/d/ast-20000103.log.bak" ] && [ ! -e "$T/d/ast-20000103.log.tmp" ]; then
+    echo "PASS: wrong key in livelog.conf keeps the file"
+else
+    echo "FAIL: wrong key in livelog.conf keeps the file"; FAIL=1
+fi
+
 [ "$FAIL" -eq 0 ] && echo "ALL TESTS PASSED" || { echo "SOME TESTS FAILED"; exit 1; }
