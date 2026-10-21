@@ -46,12 +46,19 @@ EVENT hangup SIP/100
 - The files are encrypted. Simple encryption (RC4 with a random nonce for each line). It stops people from reading the file as plain text. It is not strong encryption.
 - Each line is saved at once. After a crash or power loss, all lines written before are still readable.
 
-## Install (Debian / Ubuntu)
+## Compile only
 
 ```sh
 apt install build-essential git
 git clone https://github.com/fatehiman/linux-live-log-processor.git
 cd linux-live-log-processor
+sh compile.sh          # build only
+sh compile.sh test     # build and run the tests
+```
+
+## Install as a service (Debian / Ubuntu)
+
+```sh
 sudo sh install.sh
 sudo nano /opt/livelog/livelog.conf      # set key, command, match
 sudo systemctl start livelog
